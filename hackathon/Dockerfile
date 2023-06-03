@@ -12,7 +12,7 @@ COPY go.mod ./
 RUN go mod download
 
 # ソースコードをコピー＝main.goファイルを、コンテナ内の作業ディレクトリにコピー
-COPY main.go .
+COPY . .
 
 EXPOSE 8080
 
