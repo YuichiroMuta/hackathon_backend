@@ -4,8 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	_ "github.com/go-sql-driver/mysql"
-	"github.com/joho/godotenv"
 	"github.com/oklog/ulid"
 	"log"
 	"math/rand"
@@ -14,6 +12,9 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/oklog/ulid"
 )
 
 type UserResForHTTPGet struct {
@@ -21,16 +22,15 @@ type UserResForHTTPGet struct {
 	Name string `json:"name"`
 	Age  int    `json:"age"`
 }
+type UserResForHTTPPost struct {
+	Id string `json:"id"`
+}
 
 // ① GoプログラムからMySQLへ接続
 var db *sql.DB
 
 func init() {
 	// ①-1
-	err := godotenv.Load(".env")
-	if err != nil {
-		fmt.Printf("読み込みできませんでした：%v", err)
-	}
 	// DB接続のための準備
 	mysqlUser := os.Getenv("MYSQL_USER")
 	mysqlPwd := os.Getenv("MYSQL_PWD")
@@ -40,6 +40,7 @@ func init() {
 	connStr := fmt.Sprintf("%s:%s@%s/%s", mysqlUser, mysqlPwd, mysqlHost, mysqlDatabase)
 	_db, err := sql.Open("mysql", connStr)
 
+	// ①-2
 	if err != nil {
 		log.Fatalf("fail: sql.Open, %v\n", err)
 	}
@@ -50,24 +51,12 @@ func init() {
 	db = _db
 }
 
-type UserReqForHTTPPost struct {
-	Name string `json:"name"`
-	Age  int    `json:"age"`
-}
-
-func generateULID() string {
-	t := time.Now()
-	entropy := ulid.Monotonic(rand.New(rand.NewSource(t.UnixNano())), 0)
-	id := ulid.MustNew(ulid.Timestamp(t), entropy).String()
-	return id
-}
-
 // ② /userでリクエストされたらnameパラメーターと一致する名前を持つレコードをJSON形式で返す
 func handler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		// ②-1
-		name := r.URL.Query().Get("name")
+		name := r.URL.Query().Get("name") // To be filled
 		if name == "" {
 			log.Println("fail: name is empty")
 			w.WriteHeader(http.StatusBadRequest)
@@ -107,67 +96,52 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(bytes)
-
 	case http.MethodPost:
-		decoder := json.NewDecoder(r.Body)
-		var userReq UserReqForHTTPPost
-		err := decoder.Decode(&userReq)
+		var user UserResForHTTPGet
+		if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+			fmt.Println(err)
+			return
+		}
+		t := time.Now()
+		entropy := ulid.Monotonic(rand.New(rand.NewSource(t.UnixNano())), 0)
+		id := ulid.MustNew(ulid.Timestamp(t), entropy)
+		if user.Name == "" || len(user.Name) > 50 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if user.Age > 80 || user.Age < 20 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		tx, er := db.Begin()
+		if er != nil {
+			log.Fatal(er)
+		}
+		_, err := db.Query("INSERT INTO user (id, name, age) VALUES (?, ?, ?);", id.String(), user.Name, user.Age)
 		if err != nil {
-			log.Printf("fail: json decode, %v\n", err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		// nameの長さチェック
-		if userReq.Name == "" || len(userReq.Name) >= 50 {
-			log.Println("fail: invalid name")
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		if userReq.Age < 20 || userReq.Age > 80 {
-			log.Println("fail: invalid age")
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		id := generateULID()
-
-		// INSERT文実行
-		stmt, err := db.Prepare("INSERT INTO user (id, name, age) VALUES (?, ?, ?)")
-		if err != nil {
-			log.Printf("fail: db.Prepare, %v\n", err)
+			log.Println("insert error")
 			w.WriteHeader(http.StatusInternalServerError)
+			tx.Rollback()
 			return
 		}
-		defer stmt.Close()
-
-		_, err = stmt.Exec(id, userReq.Name, userReq.Age)
-		if err != nil {
-			log.Printf("fail: stmt.Exec, %v\n", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
+		tx.Commit()
+		log.Printf("id: %v\n", id.String())
+		s := UserResForHTTPPost{
+			Id: id.String(),
 		}
-		response := struct {
-			ID string `json:"id"`
-		}{ID: id}
-
-		bytes, err := json.Marshal(response)
+		ans, err := json.Marshal(s)
 		if err != nil {
 			log.Printf("fail: json.Marshal, %v\n", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write(bytes)
-
+		w.Write(ans)
+		return
 	default:
 		log.Printf("fail: HTTP Method is %s\n", r.Method)
 		w.WriteHeader(http.StatusBadRequest)
 		return
-
 	}
 }
 
@@ -178,7 +152,7 @@ func main() {
 	// ③ Ctrl+CでHTTPサーバー停止時にDBをクローズする
 	closeDBWithSysCall()
 
-	// 8080番ポートでリクエストを待ち受ける
+	// 8000番ポートでリクエストを待ち受ける
 	log.Println("Listening...")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatal(err)
