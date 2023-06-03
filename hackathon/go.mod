@@ -1,4 +1,4 @@
-module curriculum_3_muta-yuichiro/db
+module test
 
 go 1.20
 
